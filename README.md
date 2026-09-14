@@ -36,6 +36,58 @@ The backend runs at `http://127.0.0.1:8000`.
 
 Swagger UI is available at `http://127.0.0.1:8000/docs`.
 
+## Run with Docker
+
+Build the image from the repository root:
+
+```bash
+docker build -t drive-api:local .
+```
+
+Create `.env.docker` for a local container:
+
+```dotenv
+APP_ENV=dev
+DATABASE_URL_TEMPLATE=sqlite+aiosqlite:////data/drive.db
+STORAGE_BACKEND=local
+JWT_SECRET_KEY=replace-with-a-random-secret
+```
+
+Initialize a persistent volume, run migrations, and start the API:
+
+```bash
+docker volume create drive-data
+docker run --rm --env-file .env.docker -v drive-data:/data drive-api:local alembic upgrade head
+docker run --rm --name drive-api --env-file .env.docker -v drive-data:/data -p 127.0.0.1:8000:8000 drive-api:local
+```
+
+Open `http://127.0.0.1:8000/docs`. To add demo users locally, run:
+
+```bash
+docker run --rm --env-file .env.docker -v drive-data:/data drive-api:local python -m app.db.seed
+```
+
+The container runs as UID/GID `10001:10001`, listens on port `8000`, and
+writes logs to stdout/stderr. Local uploads default to `/data/storage`.
+Bind-mounted data directories must be writable by that UID. Environment
+files, credentials, local data, and development files are excluded from the
+build context; configuration is supplied at runtime.
+
+For ECS, configure container port `8000`, `STORAGE_BACKEND=s3`, `S3_BUCKET`,
+and `S3_REGION`. Use a database URL such as
+`postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@database-host:5432/drive` in
+`DATABASE_URL_TEMPLATE`, and inject `DB_USER`, `DB_PASSWORD`, and
+`JWT_SECRET_KEY` from Secrets Manager. Use an ECS task role for S3 access.
+Build for the task's CPU architecture (for example, add
+`--platform linux/amd64` to `docker build` for an x86_64 task).
+
+Run `alembic upgrade head` as a separate one-off task using the same image,
+database configuration, and network access before starting the service.
+Migrations and demo seeding do not run automatically on API startup.
+The existing `/docs` route can serve as an HTTP liveness check; it does not
+check database or S3 connectivity. Promote the same image from staging to
+production as described in [the architecture](docs/architecture.md).
+
 ## S3 setup
 
 Local storage is used by default. Set `STORAGE_BACKEND=s3` in `.env.dev` (or

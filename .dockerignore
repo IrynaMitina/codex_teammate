@@ -1,0 +1,17 @@
+# Only runtime sources and migration configuration belong in the build context.
+**
+!requirements.txt
+!app/
+!app/**
+!migrations/
+!migrations/**
+!alembic.ini
+
+# Exclude generated files and secrets even inside allowed directories.
+**/__pycache__/
+**/*.py[cod]
+**/.env*
+**/*.pem
+**/*.key
+**/*.db
+**/storage/

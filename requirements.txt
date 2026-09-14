@@ -1,6 +1,7 @@
 sqlalchemy[asyncio]
 alembic
 aiosqlite
+asyncpg
 fastapi 
 uvicorn 
 aiofiles 
