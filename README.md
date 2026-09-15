@@ -88,6 +88,11 @@ The existing `/docs` route can serve as an HTTP liveness check; it does not
 check database or S3 connectivity. Promote the same image from staging to
 production as described in [the architecture](docs/architecture.md).
 
+## AWS infrastructure templates
+
+See [infra/README.md](infra/README.md) for the shared ECR repository and isolated
+staging/production CloudFormation stacks, deployment steps, and migrations.
+
 ## S3 setup
 
 Local storage is used by default. Set `STORAGE_BACKEND=s3` in `.env.dev` (or

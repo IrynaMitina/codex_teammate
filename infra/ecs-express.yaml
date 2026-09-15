@@ -1,0 +1,317 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Isolated Drive staging or production environment using ECS Express Mode.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [staging, production]
+  ImageUri:
+    Type: String
+    Description: Image from the shared ECR repository, pinned to an immutable SHA256 digest.
+    AllowedPattern: '^.+\.dkr\.ecr\..+\.amazonaws\.com(\.cn)?/.+@sha256:[a-f0-9]{64}$'
+  DatabaseInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  DatabaseStorageGiB:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 1000
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+    AllowedValues: [1, 3, 5, 7, 14, 30]
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, production]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicAssociationA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+  PublicAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+  DatabaseSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+  DatabaseSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+  DatabaseRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+  DatabaseAssociationA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DatabaseSubnetA
+      RouteTableId: !Ref DatabaseRouteTable
+  DatabaseAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DatabaseSubnetB
+      RouteTableId: !Ref DatabaseRouteTable
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Additional task identity for database access; no extra inbound access
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL access only from tasks in this environment
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref TaskSecurityGroup
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Isolated database subnets in two availability zones
+      SubnetIds: [!Ref DatabaseSubnetA, !Ref DatabaseSubnetB]
+  DatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"drive_admin"}'
+        GenerateStringKey: password
+        PasswordLength: 40
+        # The application interpolates credentials into a URL without escaping.
+        ExcludePunctuation: true
+  JwtSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: postgres
+      DBName: drive
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      AllocatedStorage: !Ref DatabaseStorageGiB
+      StorageType: gp3
+      StorageEncrypted: true
+      MultiAZ: false
+      PubliclyAccessible: false
+      BackupRetentionPeriod: !If [IsProduction, 7, 1]
+      DeletionProtection: !If [IsProduction, true, false]
+      AutoMinorVersionUpgrade: true
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DatabaseSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DatabaseSecret}:SecretString:password}}'
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups: [!Ref DatabaseSecurityGroup]
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  UploadBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref UploadBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource: [!GetAtt UploadBucket.Arn, !Sub '${UploadBucket.Arn}/*']
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+  Cluster:
+    Type: AWS::ECS::Cluster
+  InfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadEnvironmentSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: [!Ref DatabaseSecret, !Ref JwtSecret]
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EnvironmentUploads
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:AbortMultipartUpload]
+                Resource: !Sub '${UploadBucket.Arn}/*'
+  Service:
+    Type: AWS::ECS::ExpressGatewayService
+    DependsOn: [PublicRoute, PublicAssociationA, PublicAssociationB, UploadBucketPolicy]
+    Properties:
+      Cluster: !Ref Cluster
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      InfrastructureRoleArn: !GetAtt InfrastructureRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Cpu: '256'
+      Memory: '512'
+      HealthCheckPath: /docs
+      ScalingTarget:
+        MinTaskCount: 1
+        MaxTaskCount: !If [IsProduction, 4, 2]
+        AutoScalingMetric: AVERAGE_CPU
+        AutoScalingTargetValue: 60
+      NetworkConfiguration:
+        Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+        SecurityGroups: [!Ref TaskSecurityGroup]
+      PrimaryContainer:
+        Image: !Ref ImageUri
+        ContainerPort: 8000
+        AwsLogsConfiguration:
+          LogGroup: !Ref LogGroup
+          LogStreamPrefix: api
+        Environment:
+          - Name: APP_ENV
+            Value: !Ref Environment
+          - Name: DEBUG
+            Value: 'false'
+          - Name: LOG_LEVEL
+            Value: INFO
+          - Name: STORAGE_BACKEND
+            Value: s3
+          - Name: S3_BUCKET
+            Value: !Ref UploadBucket
+          - Name: S3_REGION
+            Value: !Ref AWS::Region
+          - Name: DATABASE_URL_TEMPLATE
+            Value: !Sub 'postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@${Database.Endpoint.Address}:${Database.Endpoint.Port}/drive'
+        Secrets:
+          - Name: DB_USER
+            ValueFrom: !Sub '${DatabaseSecret}:username::'
+          - Name: DB_PASSWORD
+            ValueFrom: !Sub '${DatabaseSecret}:password::'
+          - Name: JWT_SECRET_KEY
+            ValueFrom: !Ref JwtSecret
+
+Outputs:
+  Endpoint:
+    Value: !GetAtt Service.Endpoint
+  ServiceArn:
+    Value: !GetAtt Service.ServiceArn
+  ClusterName:
+    Value: !Ref Cluster
+  UploadBucketName:
+    Value: !Ref UploadBucket
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  LogGroupName:
+    Value: !Ref LogGroup
+  TaskSubnets:
+    Value: !Join [',', [!Ref PublicSubnetA, !Ref PublicSubnetB]]
+  TaskSecurityGroupId:
+    Value: !Ref TaskSecurityGroup
