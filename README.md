@@ -156,7 +156,7 @@ python -m pytest
 [The CI workflow](.github/workflows/ci.yml) runs on pull requests targeting
 `main`, pushes to `main`, and manual dispatch. It uses Python 3.12, a temporary
 SQLite database, and local temporary storage. No AWS credentials or deployment
-secrets are required. A failing test or total application coverage below 80%
+secrets are required. A failing test or total application coverage below 82%
 fails the `Tests and coverage` check; missing lines appear in the job log.
 
 Run the same coverage gate locally with an isolated test database:
@@ -167,7 +167,7 @@ APP_ENV=test DEBUG=false \
 DATABASE_URL_TEMPLATE=sqlite+aiosqlite:///./test_drive.db \
 STORAGE_BACKEND=local STORAGE_DIR=./.test-storage \
 JWT_SECRET_KEY=ci-only-test-secret-not-for-deployment \
-python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=80
+python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=82
 ```
 
 Tests recreate the configured database tables, so always use a disposable test
@@ -176,6 +176,39 @@ for `main`: require pull requests and require the `Tests and coverage` status
 check, with the branch up to date before merging. Select the check after its
 first workflow run. The workflow file alone does not enforce branch protection.
 AWS deployment and production approval are the separate CD part of DRIVE-6.
+
+### Staging smoke tests (DRIVE-7)
+
+The [shared HTTP scenario](smoke/scenario.py) covers all ten steps in the
+[DRIVE-7 comment](https://irina29mitina.atlassian.net/browse/DRIVE-7?focusedCommentId=10203):
+Alice logs in, creates `Smoke Test`, uploads and lists a text file, and checks
+its downloaded bytes. Bob logs in and is denied access, then downloads after
+Alice grants viewer access. An anonymous request downloads the public link.
+After Alice deletes the file, it disappears from the folder, Bob's download
+is denied, and the public link returns 404.
+
+CI runs this same scenario in-process via `tests/test_smoke_scenario.py`.
+The remote entry point is separate from the local database-reset fixtures:
+it only makes HTTP requests and never seeds users or accesses the database.
+Provide two existing, distinct staging test accounts and Bob's actual user ID.
+Supply passwords through the future CodeBuild job's secret environment variables.
+
+```bash
+python -m pip install -r requirements-ci.txt
+# Set SMOKE_BASE_URL to the staging API origin (https://...), and supply:
+# SMOKE_ALICE_EMAIL, SMOKE_ALICE_PASSWORD,
+# SMOKE_BOB_EMAIL, SMOKE_BOB_PASSWORD, SMOKE_BOB_USER_ID
+python -m pytest smoke/test_staging.py -q --tb=short
+```
+
+Missing settings fail the explicit smoke run. Default `python -m pytest` only
+collects `tests/`, so it does not contact staging. Each smoke invocation creates
+its own folder and unique file contents, checks resources by ID, and attempts
+cleanup even on failure. File bytes are deleted before the folder is soft
+deleted; soft-deleted database records remain. Use dedicated staging accounts.
+The HTTP client has a 30-second request timeout; configure an overall timeout
+on the future CodeBuild job. Run after migrations and service readiness, without
+`--cov`: local code coverage cannot measure a remotely deployed application.
 
 ## Typical Local Scenario With curl
 
