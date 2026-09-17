@@ -151,6 +151,32 @@ take effect. `STORAGE_DIR` is ignored while the S3 backend is selected.
 python -m pytest
 ```
 
+## Continuous integration
+
+[The CI workflow](.github/workflows/ci.yml) runs on pull requests targeting
+`main`, pushes to `main`, and manual dispatch. It uses Python 3.12, a temporary
+SQLite database, and local temporary storage. No AWS credentials or deployment
+secrets are required. A failing test or total application coverage below 80%
+fails the `Tests and coverage` check; missing lines appear in the job log.
+
+Run the same coverage gate locally with an isolated test database:
+
+```bash
+python -m pip install -r requirements-ci.txt
+APP_ENV=test DEBUG=false \
+DATABASE_URL_TEMPLATE=sqlite+aiosqlite:///./test_drive.db \
+STORAGE_BACKEND=local STORAGE_DIR=./.test-storage \
+JWT_SECRET_KEY=ci-only-test-secret-not-for-deployment \
+python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=80
+```
+
+Tests recreate the configured database tables, so always use a disposable test
+database. To block merges, configure a GitHub branch protection rule or ruleset
+for `main`: require pull requests and require the `Tests and coverage` status
+check, with the branch up to date before merging. Select the check after its
+first workflow run. The workflow file alone does not enforce branch protection.
+AWS deployment and production approval are the separate CD part of DRIVE-6.
+
 ## Typical Local Scenario With curl
 
 Set the API address once. Using this variable also keeps the commands safe to

@@ -3,4 +3,7 @@
 .venv/*
 *.db
 **/storage/*
-
+.coverage
+.coverage.*
+htmlcov/
+.test-storage/
