@@ -39,8 +39,8 @@ To run the backend API in AWS:
 > **Important:** Production and staging are fully isolated. They use separate databases, S3 buckets, secrets, and compute resources.
 
 ## Automation
-Sketch for CI/CD pipeline.
-Pipeline will have 2 parts: first - in GitHub, second - in AWS.
+The pipeline has two parts: CI in GitHub Actions and CD in AWS CodePipeline.
+See [AWS CD setup](../infra/README.md#continuous-delivery-drive-6).
 
 ### CI
 - Creating or updating a pull request to `main` runs unit tests automatically.
@@ -48,10 +48,6 @@ Pipeline will have 2 parts: first - in GitHub, second - in AWS.
 - Failed tests or insufficient coverage block the merge.
 
 ### CD
-- Merge to `main` triggers deployment to **staging**.
-- After deployment, smoke tests run automatically against staging.
-- Failed smoke tests stop the release.
-- Deployment to **production** requires manual approval.
 - Merge to `main` triggers deployment to **staging**.
 - After deployment, smoke tests run automatically against staging.
 - Failed smoke tests stop the release.

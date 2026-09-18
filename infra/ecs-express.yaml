@@ -303,6 +303,24 @@ Outputs:
     Value: !GetAtt Service.Endpoint
   ServiceArn:
     Value: !GetAtt Service.ServiceArn
+    Export:
+      Name: !Sub '${AWS::StackName}-ServiceArn'
+  ClusterArn:
+    Value: !GetAtt Cluster.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterArn'
+  TaskRoleArn:
+    Value: !GetAtt TaskRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskRoleArn'
+  ExecutionRoleArn:
+    Value: !GetAtt ExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ExecutionRoleArn'
+  InfrastructureRoleArn:
+    Value: !GetAtt InfrastructureRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-InfrastructureRoleArn'
   ClusterName:
     Value: !Ref Cluster
   UploadBucketName:

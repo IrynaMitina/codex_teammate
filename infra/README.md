@@ -92,9 +92,8 @@ aws cloudformation deploy \
 ```
 
 Repeat the migration step for a first production deployment, then smoke-test.
-These templates provision infrastructure; CI, smoke-test automation and the
-manual approval gate belong to the separate CD pipeline described in the
-architecture.
+These templates provision the application infrastructure. The CD pipeline below
+automates subsequent migrations, deployment, staging smoke tests, and approval.
 
 ## Secrets and lifecycle
 
@@ -124,3 +123,127 @@ The template uses the native
 Linting validates the template schema and references; a staging deployment is
 still required to verify account permissions, regional capacity and runtime
 connectivity.
+
+## Continuous delivery (DRIVE-6)
+
+[`pipeline.yaml`](pipeline.yaml) provisions AWS CodePipeline V2, four CodeBuild
+projects, separate build/smoke/staging/production IAM roles, an encrypted private
+artifact bucket, and seven-day build logs. GitHub remains responsible for CI.
+The pipeline uses an existing GitHub CodeConnections connection to detect pushes
+to `main`. Protect `main` with the required `Tests and coverage` check and disable
+unreviewed direct pushes; the AWS source trigger does not wait for GitHub checks.
+
+The release sequence is:
+
+1. Build an x86_64 Docker image tagged with the full source commit, push it to
+   immutable ECR, and write its resolved digest and commit to `release.json`.
+   Retrying a previously built commit reuses its existing image.
+2. Register a separate staging migration task definition with the candidate
+   image and the environment's current roles, secrets, and configuration.
+   Run `alembic upgrade head` and require exit code zero before updating
+   CloudFormation's `ImageUri` parameter. Preserve the deployed template and
+   all other parameter values, wait for stack completion and ECS stability,
+   and verify the running service's task definition uses the candidate digest.
+3. Run **SmokeTesting** in CodeBuild against the staging stack's HTTPS endpoint,
+   using the existing DRIVE-7 scenario in `smoke/test_staging.py`. Missing
+   credentials, failed assertions, or the ten-minute build timeout fail the action.
+4. Wait for **ApproveProduction** in the CodePipeline console. Review the commit,
+   staging results, and `release.json`. Only identities authorized for
+   `codepipeline:PutApprovalResult` should approve; no pipeline/build role has it.
+5. Migrate production, update its stack, and verify service stability using the
+   exact same release artifact and image digest. Production has no Docker build
+   permission or access to the staging smoke credentials.
+
+The deployment, smoke, approval, and production actions intentionally share a
+single `Release` stage with sequential run orders. Together with `QUEUED` mode,
+this prevents another execution from replacing staging while a release is
+being tested or awaiting approval. Do not start these CodeBuild projects directly
+or update the environment stacks concurrently with a release.
+
+### One-time setup
+
+Use one account and region for the image, environment, connection, and pipeline
+resources. Before creating the pipeline:
+
+- Deploy the ECR stack and both environment stacks using the bootstrap steps
+  above, including initial migrations. Existing stacks must be updated with
+  the current templates to add the exported repository, service, cluster, and
+  role ARNs. Preserve their existing image digests and parameter overrides.
+- Authorize a GitHub connection in the AWS CodeConnections console for this
+  repository. It must be `AVAILABLE`; creating a connection alone does not
+  complete GitHub authorization. See [AWS's GitHub connection instructions](https://docs.aws.amazon.com/codepipeline/latest/userguide/connections-github.html).
+- Provision two dedicated, distinct staging accounts through your controlled
+  account provisioning process. There is no automatic demo seeding or public
+  registration endpoint. Record Bob's real database user ID.
+- Create a Secrets Manager secret in the same region using its default AWS
+  managed key. Its JSON keys must be `alice_email`, `alice_password`, `bob_email`,
+  `bob_password`, and `bob_user_id`. The last value is a positive integer or its
+  string representation. Enter actual passwords in Secrets Manager, never in
+  this repository or CloudFormation parameters. A customer-managed KMS key
+  requires an additional scoped `kms:Decrypt` grant on `SmokeRole` and key policy.
+- Merge the pipeline files, buildspecs, and release script to `main` before
+  provisioning the pipeline: AWS retrieves those files from that branch.
+
+Set `CONNECTION_ARN` and `SMOKE_SECRET_ARN` to those existing resource ARNs, then:
+
+```bash
+aws cloudformation deploy \
+  --template-file infra/pipeline.yaml --stack-name drive-cd \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides \
+    ConnectionArn="$CONNECTION_ARN" \
+    GitHubRepository=IrynaMitina/codex_teammate \
+    ImageStackName=drive-images \
+    StagingStackName=drive-staging \
+    ProductionStackName=drive-production \
+    SmokeSecretArn="$SMOKE_SECRET_ARN"
+```
+
+Provisioning creates billable resources and can start the initial pipeline
+execution. Later pushes to `main` start it automatically. The `PipelineUrl`
+stack output links to execution history and the production approval action.
+No SNS subscription is created; approvals are handled in the console.
+See [AWS's manual approval documentation](https://docs.aws.amazon.com/codepipeline/latest/userguide/approvals-action-add.html).
+
+The deployment roles update existing stacks only. They do not create databases,
+networks, or buckets. Each environment's narrow CloudFormation execution role
+is attached to that stack on its first CD update. For subsequent infrastructure
+changes or teardown, explicitly supply an appropriately privileged provisioning
+role with `--role-arn`; otherwise CloudFormation keeps using the release role.
+Environment stacks export values consumed by the pipeline, so delete the
+pipeline stack before intentionally deleting either environment stack.
+
+### Failure handling and validation
+
+Migration launch failures, nonzero or missing exit codes, stack failures, and
+wrong-image rollbacks stop the release. A migration that exceeds 15 minutes is
+stopped; its temporary task-definition revision is deregistered. Inspect the
+printed migration task ARN and the environment's `LogGroupName` output. Staging
+smoke failure prevents the approval and production actions from running. Reject
+an unsafe release in the approval action; approvals expire after seven days.
+Fix the problem and retry or release a new commit through the full sequence.
+
+Database migrations must use backward-compatible expand/contract changes.
+CloudFormation can roll back the service update, but it does not undo database
+migrations. There is no automatic schema downgrade or rollback after a smoke
+failure. An image rollback must therefore be compatible with the current schema.
+
+The artifact bucket is retained on deletion; artifacts expire after 30 days.
+ECR images are retained, and the pipeline never deletes them. Failed executions
+older than artifact retention should be replaced with a new full execution.
+
+```bash
+cfn-lint infra/ecr.yaml infra/ecs-express.yaml infra/pipeline.yaml
+# With the disposable local test environment described in the root README:
+python -m pytest tests/test_cd_release.py -q
+```
+
+Offline tests cover immutable image reuse, artifact validation, migration
+failure/timeout gates, configuration preservation, and wrong-image rollbacks.
+They do not prove AWS account permissions or runtime networking. To validate in
+AWS, merge a small change, observe staging and a successful SmokeTesting action,
+confirm production remains unchanged pending approval, and approve the release.
+Compare the image digests in both stacks. For a negative smoke test, temporarily
+use an invalid staging test account, verify the release stops before approval,
+then restore the secret and retry. Validate this before relying on the pipeline
+for production releases.
