@@ -187,13 +187,17 @@ Resources:
               Fn::ImportValue:
                 Fn::Sub: ${StagingStackName}-ServiceArn
           - Effect: Allow
-            Action: ecs:RegisterTaskDefinition
+            Action:
+            - ecs:RegisterTaskDefinition
+            - ecs:DescribeTaskDefinition
             Resource: '*'
           - Effect: Allow
             Action:
             - ecs:DescribeServiceDeployments
             - ecs:DescribeServiceRevisions
             Resource:
+            - Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-ServiceArn
             - Fn::Sub:
               - arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service-deployment/${ServicePath}/*
               - ServicePath:
@@ -308,10 +312,14 @@ Resources:
             - ecs:DescribeTaskDefinition
             - ecs:RegisterTaskDefinition
             Resource: '*'
+          # ECS does not support resource-level permissions for deregistration.
           - Effect: Allow
             Action: ecs:DeregisterTaskDefinition
-            Resource:
-              Fn::Sub: arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/drive-cd-${StagingStackName}-migration:*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:RequestedRegion:
+                  Ref: AWS::Region
           - Effect: Allow
             Action:
             - ecs:DescribeTasks
@@ -401,13 +409,17 @@ Resources:
               Fn::ImportValue:
                 Fn::Sub: ${ProductionStackName}-ServiceArn
           - Effect: Allow
-            Action: ecs:RegisterTaskDefinition
+            Action:
+            - ecs:RegisterTaskDefinition
+            - ecs:DescribeTaskDefinition
             Resource: '*'
           - Effect: Allow
             Action:
             - ecs:DescribeServiceDeployments
             - ecs:DescribeServiceRevisions
             Resource:
+            - Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-ServiceArn
             - Fn::Sub:
               - arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service-deployment/${ServicePath}/*
               - ServicePath:
@@ -522,10 +534,14 @@ Resources:
             - ecs:DescribeTaskDefinition
             - ecs:RegisterTaskDefinition
             Resource: '*'
+          # ECS does not support resource-level permissions for deregistration.
           - Effect: Allow
             Action: ecs:DeregisterTaskDefinition
-            Resource:
-              Fn::Sub: arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/drive-cd-${ProductionStackName}-migration:*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:RequestedRegion:
+                  Ref: AWS::Region
           - Effect: Allow
             Action:
             - ecs:DescribeTasks
