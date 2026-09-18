@@ -30,6 +30,13 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+
+@app.get("/health", tags=["Health"])
+async def health() -> dict[str, str]:
+    """Report API liveness without checking external dependencies."""
+    return {"status": "ok"}
+
+
 app.include_router(
     v1_router,
     prefix="/api/v1",
