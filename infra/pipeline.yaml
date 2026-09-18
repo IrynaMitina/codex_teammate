@@ -224,6 +224,29 @@ Resources:
             Resource:
               Fn::ImportValue:
                 Fn::Sub: ${StagingStackName}-ServiceArn
+          # CloudFormation resolves GetAtt attributes from existing dependencies.
+          - Effect: Allow
+            Action: iam:GetRole
+            Resource:
+            - Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-TaskRoleArn
+            - Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-ExecutionRoleArn
+            - Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-InfrastructureRoleArn
+          - Effect: Allow
+            Action: ecs:DescribeClusters
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-ClusterArn
+          - Effect: Allow
+            Action: rds:DescribeDBInstances
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/aws:cloudformation:stack-name:
+                  Ref: StagingStackName
           - Effect: Allow
             Action: iam:PassRole
             Resource:
@@ -446,6 +469,29 @@ Resources:
             Resource:
               Fn::ImportValue:
                 Fn::Sub: ${ProductionStackName}-ServiceArn
+          # CloudFormation resolves GetAtt attributes from existing dependencies.
+          - Effect: Allow
+            Action: iam:GetRole
+            Resource:
+            - Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-TaskRoleArn
+            - Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-ExecutionRoleArn
+            - Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-InfrastructureRoleArn
+          - Effect: Allow
+            Action: ecs:DescribeClusters
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-ClusterArn
+          - Effect: Allow
+            Action: rds:DescribeDBInstances
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/aws:cloudformation:stack-name:
+                  Ref: ProductionStackName
           - Effect: Allow
             Action: iam:PassRole
             Resource:
