@@ -1,0 +1,871 @@
+# Release actions share one stage so the stage lock protects staging through approval.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'DRIVE-6: GitHub main to ECS Express staging, smoke tests, manual approval,
+  and production.'
+Parameters:
+  ConnectionArn:
+    Type: String
+    Description: AVAILABLE GitHub CodeConnections connection ARN in this region.
+  GitHubRepository:
+    Type: String
+    Default: IrynaMitina/codex_teammate
+    AllowedPattern: '[^/]+/[^/]+'
+    Description: GitHub owner/repository; main must require the CI check.
+  ImageStackName:
+    Type: String
+    Default: drive-images
+  StagingStackName:
+    Type: String
+    Default: drive-staging
+  ProductionStackName:
+    Type: String
+    Default: drive-production
+  SmokeSecretArn:
+    Type: String
+    Description: Staging-only Secrets Manager JSON with alice_email, alice_password,
+      bob_email, bob_password, bob_user_id; use the AWS managed Secrets Manager key.
+Resources:
+  Artifacts:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+        - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+        - Id: ExpireArtifacts
+          Status: Enabled
+          ExpirationInDays: 30
+          NoncurrentVersionExpiration:
+            NoncurrentDays: 30
+          AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 1
+  ArtifactsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: Artifacts
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Deny
+          Principal: '*'
+          Action: s3:*
+          Resource:
+          - Fn::GetAtt:
+            - Artifacts
+            - Arn
+          - Fn::Sub: ${Artifacts.Arn}/*
+          Condition:
+            Bool:
+              aws:SecureTransport: false
+  BuildLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 7
+  BuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: PipelineAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetBucketLocation
+            - s3:GetBucketVersioning
+            - s3:ListBucket
+            Resource:
+              Fn::GetAtt:
+              - Artifacts
+              - Arn
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:PutObject
+            Resource:
+              Fn::Sub: ${Artifacts.Arn}/*
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+              Fn::GetAtt:
+              - BuildLogs
+              - Arn
+          - Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - ecr:DescribeImages
+            - ecr:BatchGetImage
+            - ecr:GetDownloadUrlForLayer
+            - ecr:BatchCheckLayerAvailability
+            - ecr:InitiateLayerUpload
+            - ecr:UploadLayerPart
+            - ecr:CompleteLayerUpload
+            - ecr:PutImage
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: ${ImageStackName}-RepositoryArn
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      ServiceRole:
+        Fn::GetAtt:
+        - BuildRole
+        - Arn
+      TimeoutInMinutes: 30
+      QueuedTimeoutInMinutes: 30
+      ConcurrentBuildLimit: 1
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra/buildspecs/build.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+        - Name: REPOSITORY_URI
+          Value:
+            Fn::ImportValue:
+              Fn::Sub: ${ImageStackName}-RepositoryUri
+          Type: PLAINTEXT
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName:
+            Ref: BuildLogs
+  StagingCloudFormationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: cloudformation.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: PipelineAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ecs:UpdateExpressGatewayService
+            - ecs:DescribeExpressGatewayService
+            - ecs:DescribeServices
+            - ecs:ListServiceDeployments
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-ServiceArn
+          - Effect: Allow
+            Action: ecs:RegisterTaskDefinition
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - ecs:DescribeServiceDeployments
+            - ecs:DescribeServiceRevisions
+            Resource:
+            - Fn::Sub:
+              - arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service-deployment/${ServicePath}/*
+              - ServicePath:
+                  Fn::Select:
+                  - 1
+                  - Fn::Split:
+                    - :service/
+                    - Fn::ImportValue:
+                        Fn::Sub: ${StagingStackName}-ServiceArn
+            - Fn::Sub:
+              - arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service-revision/${ServicePath}/*
+              - ServicePath:
+                  Fn::Select:
+                  - 1
+                  - Fn::Split:
+                    - :service/
+                    - Fn::ImportValue:
+                        Fn::Sub: ${StagingStackName}-ServiceArn
+          - Effect: Allow
+            Action:
+            - ecs:TagResource
+            - ecs:UntagResource
+            - ecs:ListTagsForResource
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-ServiceArn
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource:
+            - Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-TaskRoleArn
+            - Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-ExecutionRoleArn
+            - Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-InfrastructureRoleArn
+            Condition:
+              StringEquals:
+                iam:PassedToService:
+                - ecs.amazonaws.com
+                - ecs-tasks.amazonaws.com
+  StagingDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: PipelineAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetBucketLocation
+            - s3:GetBucketVersioning
+            - s3:ListBucket
+            Resource:
+              Fn::GetAtt:
+              - Artifacts
+              - Arn
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:PutObject
+            Resource:
+              Fn::Sub: ${Artifacts.Arn}/*
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+              Fn::GetAtt:
+              - BuildLogs
+              - Arn
+          - Effect: Allow
+            Action:
+            - cloudformation:DescribeStacks
+            - cloudformation:UpdateStack
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StagingStackName}/*
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              Fn::GetAtt:
+              - StagingCloudFormationRole
+              - Arn
+            Condition:
+              StringEquals:
+                iam:PassedToService: cloudformation.amazonaws.com
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource:
+            - Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-TaskRoleArn
+            - Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-ExecutionRoleArn
+            Condition:
+              StringEquals:
+                iam:PassedToService: ecs-tasks.amazonaws.com
+          - Effect: Allow
+            Action: ecs:DescribeServices
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: ${StagingStackName}-ServiceArn
+          - Effect: Allow
+            Action:
+            - ecs:DescribeTaskDefinition
+            - ecs:RegisterTaskDefinition
+            Resource: '*'
+          - Effect: Allow
+            Action: ecs:DeregisterTaskDefinition
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/drive-cd-${StagingStackName}-migration:*
+          - Effect: Allow
+            Action:
+            - ecs:DescribeTasks
+            - ecs:StopTask
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task/*
+            Condition:
+              ArnEquals:
+                ecs:cluster:
+                  Fn::ImportValue:
+                    Fn::Sub: ${StagingStackName}-ClusterArn
+          - Effect: Allow
+            Action: ecs:RunTask
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/drive-cd-${StagingStackName}-migration:*
+            Condition:
+              ArnEquals:
+                ecs:cluster:
+                  Fn::ImportValue:
+                    Fn::Sub: ${StagingStackName}-ClusterArn
+  StagingDeployProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      ServiceRole:
+        Fn::GetAtt:
+        - StagingDeployRole
+        - Arn
+      TimeoutInMinutes: 75
+      QueuedTimeoutInMinutes: 30
+      ConcurrentBuildLimit: 1
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra/buildspecs/deploy.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: false
+        EnvironmentVariables:
+        - Name: REPOSITORY_URI
+          Value:
+            Fn::ImportValue:
+              Fn::Sub: ${ImageStackName}-RepositoryUri
+          Type: PLAINTEXT
+        - Name: STACK_NAME
+          Value:
+            Ref: StagingStackName
+          Type: PLAINTEXT
+        - Name: ENVIRONMENT
+          Value: staging
+          Type: PLAINTEXT
+        - Name: CFN_ROLE_ARN
+          Value:
+            Fn::GetAtt:
+            - StagingCloudFormationRole
+            - Arn
+          Type: PLAINTEXT
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName:
+            Ref: BuildLogs
+  ProductionCloudFormationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: cloudformation.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: PipelineAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ecs:UpdateExpressGatewayService
+            - ecs:DescribeExpressGatewayService
+            - ecs:DescribeServices
+            - ecs:ListServiceDeployments
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-ServiceArn
+          - Effect: Allow
+            Action: ecs:RegisterTaskDefinition
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - ecs:DescribeServiceDeployments
+            - ecs:DescribeServiceRevisions
+            Resource:
+            - Fn::Sub:
+              - arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service-deployment/${ServicePath}/*
+              - ServicePath:
+                  Fn::Select:
+                  - 1
+                  - Fn::Split:
+                    - :service/
+                    - Fn::ImportValue:
+                        Fn::Sub: ${ProductionStackName}-ServiceArn
+            - Fn::Sub:
+              - arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service-revision/${ServicePath}/*
+              - ServicePath:
+                  Fn::Select:
+                  - 1
+                  - Fn::Split:
+                    - :service/
+                    - Fn::ImportValue:
+                        Fn::Sub: ${ProductionStackName}-ServiceArn
+          - Effect: Allow
+            Action:
+            - ecs:TagResource
+            - ecs:UntagResource
+            - ecs:ListTagsForResource
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-ServiceArn
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource:
+            - Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-TaskRoleArn
+            - Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-ExecutionRoleArn
+            - Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-InfrastructureRoleArn
+            Condition:
+              StringEquals:
+                iam:PassedToService:
+                - ecs.amazonaws.com
+                - ecs-tasks.amazonaws.com
+  ProductionDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: PipelineAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetBucketLocation
+            - s3:GetBucketVersioning
+            - s3:ListBucket
+            Resource:
+              Fn::GetAtt:
+              - Artifacts
+              - Arn
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:PutObject
+            Resource:
+              Fn::Sub: ${Artifacts.Arn}/*
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+              Fn::GetAtt:
+              - BuildLogs
+              - Arn
+          - Effect: Allow
+            Action:
+            - cloudformation:DescribeStacks
+            - cloudformation:UpdateStack
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProductionStackName}/*
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              Fn::GetAtt:
+              - ProductionCloudFormationRole
+              - Arn
+            Condition:
+              StringEquals:
+                iam:PassedToService: cloudformation.amazonaws.com
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource:
+            - Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-TaskRoleArn
+            - Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-ExecutionRoleArn
+            Condition:
+              StringEquals:
+                iam:PassedToService: ecs-tasks.amazonaws.com
+          - Effect: Allow
+            Action: ecs:DescribeServices
+            Resource:
+              Fn::ImportValue:
+                Fn::Sub: ${ProductionStackName}-ServiceArn
+          - Effect: Allow
+            Action:
+            - ecs:DescribeTaskDefinition
+            - ecs:RegisterTaskDefinition
+            Resource: '*'
+          - Effect: Allow
+            Action: ecs:DeregisterTaskDefinition
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/drive-cd-${ProductionStackName}-migration:*
+          - Effect: Allow
+            Action:
+            - ecs:DescribeTasks
+            - ecs:StopTask
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task/*
+            Condition:
+              ArnEquals:
+                ecs:cluster:
+                  Fn::ImportValue:
+                    Fn::Sub: ${ProductionStackName}-ClusterArn
+          - Effect: Allow
+            Action: ecs:RunTask
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/drive-cd-${ProductionStackName}-migration:*
+            Condition:
+              ArnEquals:
+                ecs:cluster:
+                  Fn::ImportValue:
+                    Fn::Sub: ${ProductionStackName}-ClusterArn
+  ProductionDeployProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      ServiceRole:
+        Fn::GetAtt:
+        - ProductionDeployRole
+        - Arn
+      TimeoutInMinutes: 75
+      QueuedTimeoutInMinutes: 30
+      ConcurrentBuildLimit: 1
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra/buildspecs/deploy.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: false
+        EnvironmentVariables:
+        - Name: REPOSITORY_URI
+          Value:
+            Fn::ImportValue:
+              Fn::Sub: ${ImageStackName}-RepositoryUri
+          Type: PLAINTEXT
+        - Name: STACK_NAME
+          Value:
+            Ref: ProductionStackName
+          Type: PLAINTEXT
+        - Name: ENVIRONMENT
+          Value: production
+          Type: PLAINTEXT
+        - Name: CFN_ROLE_ARN
+          Value:
+            Fn::GetAtt:
+            - ProductionCloudFormationRole
+            - Arn
+          Type: PLAINTEXT
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName:
+            Ref: BuildLogs
+  SmokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: PipelineAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetBucketLocation
+            - s3:GetBucketVersioning
+            - s3:ListBucket
+            Resource:
+              Fn::GetAtt:
+              - Artifacts
+              - Arn
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:PutObject
+            Resource:
+              Fn::Sub: ${Artifacts.Arn}/*
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+              Fn::GetAtt:
+              - BuildLogs
+              - Arn
+          - Effect: Allow
+            Action: cloudformation:DescribeStacks
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StagingStackName}/*
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              Ref: SmokeSecretArn
+  SmokeProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      ServiceRole:
+        Fn::GetAtt:
+        - SmokeRole
+        - Arn
+      TimeoutInMinutes: 10
+      QueuedTimeoutInMinutes: 30
+      ConcurrentBuildLimit: 1
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra/buildspecs/smoke.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: false
+        EnvironmentVariables:
+        - Name: REPOSITORY_URI
+          Value:
+            Fn::ImportValue:
+              Fn::Sub: ${ImageStackName}-RepositoryUri
+          Type: PLAINTEXT
+        - Name: STACK_NAME
+          Value:
+            Ref: StagingStackName
+          Type: PLAINTEXT
+        - Name: SMOKE_ALICE_EMAIL
+          Value:
+            Fn::Sub: ${SmokeSecretArn}:alice_email
+          Type: SECRETS_MANAGER
+        - Name: SMOKE_ALICE_PASSWORD
+          Value:
+            Fn::Sub: ${SmokeSecretArn}:alice_password
+          Type: SECRETS_MANAGER
+        - Name: SMOKE_BOB_EMAIL
+          Value:
+            Fn::Sub: ${SmokeSecretArn}:bob_email
+          Type: SECRETS_MANAGER
+        - Name: SMOKE_BOB_PASSWORD
+          Value:
+            Fn::Sub: ${SmokeSecretArn}:bob_password
+          Type: SECRETS_MANAGER
+        - Name: SMOKE_BOB_USER_ID
+          Value:
+            Fn::Sub: ${SmokeSecretArn}:bob_user_id
+          Type: SECRETS_MANAGER
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName:
+            Ref: BuildLogs
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: PipelineAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetBucketLocation
+            - s3:GetBucketVersioning
+            - s3:ListBucket
+            Resource:
+              Fn::GetAtt:
+              - Artifacts
+              - Arn
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:PutObject
+            Resource:
+              Fn::Sub: ${Artifacts.Arn}/*
+          - Effect: Allow
+            Action:
+            - codeconnections:UseConnection
+            - codestar-connections:UseConnection
+            Resource:
+              Ref: ConnectionArn
+          - Effect: Allow
+            Action:
+            - codebuild:StartBuild
+            - codebuild:BatchGetBuilds
+            Resource:
+            - Fn::GetAtt:
+              - BuildProject
+              - Arn
+            - Fn::GetAtt:
+              - StagingDeployProject
+              - Arn
+            - Fn::GetAtt:
+              - SmokeProject
+              - Arn
+            - Fn::GetAtt:
+              - ProductionDeployProject
+              - Arn
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn: ArtifactsPolicy
+    Properties:
+      RoleArn:
+        Fn::GetAtt:
+        - PipelineRole
+        - Arn
+      PipelineType: V2
+      ExecutionMode: QUEUED
+      RestartExecutionOnUpdate: false
+      ArtifactStore:
+        Type: S3
+        Location:
+          Ref: Artifacts
+      Stages:
+      - Name: Source
+        Actions:
+        - Name: GitHubMain
+          Namespace: Source
+          ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Provider: CodeStarSourceConnection
+            Version: '1'
+          Configuration:
+            ConnectionArn:
+              Ref: ConnectionArn
+            FullRepositoryId:
+              Ref: GitHubRepository
+            BranchName: main
+            DetectChanges: 'true'
+            OutputArtifactFormat: CODE_ZIP
+          OutputArtifacts:
+          - Name: SourceArtifact
+      - Name: Build
+        Actions:
+        - Name: BuildImage
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Provider: CodeBuild
+            Version: '1'
+          RunOrder: 1
+          InputArtifacts:
+          - Name: SourceArtifact
+          Configuration:
+            ProjectName:
+              Ref: BuildProject
+            PrimarySource: SourceArtifact
+            EnvironmentVariables: '[{"name":"SOURCE_COMMIT","value":"#{Source.CommitId}","type":"PLAINTEXT"}]'
+          OutputArtifacts:
+          - Name: ReleaseArtifact
+      - Name: Release
+        Actions:
+        - Name: DeployStaging
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Provider: CodeBuild
+            Version: '1'
+          RunOrder: 1
+          InputArtifacts:
+          - Name: SourceArtifact
+          - Name: ReleaseArtifact
+          Configuration:
+            ProjectName:
+              Ref: StagingDeployProject
+            PrimarySource: SourceArtifact
+            EnvironmentVariables: '[{"name":"SOURCE_COMMIT","value":"#{Source.CommitId}","type":"PLAINTEXT"}]'
+        - Name: SmokeTesting
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Provider: CodeBuild
+            Version: '1'
+          RunOrder: 2
+          InputArtifacts:
+          - Name: SourceArtifact
+          - Name: ReleaseArtifact
+          Configuration:
+            ProjectName:
+              Ref: SmokeProject
+            PrimarySource: SourceArtifact
+            EnvironmentVariables: '[{"name":"SOURCE_COMMIT","value":"#{Source.CommitId}","type":"PLAINTEXT"}]'
+        - Name: ApproveProduction
+          ActionTypeId:
+            Category: Approval
+            Owner: AWS
+            Provider: Manual
+            Version: '1'
+          RunOrder: 3
+          Configuration:
+            CustomData: 'Approve commit #{Source.CommitId} after successful staging
+              smoke tests. Production deploys the exact release.json image digest.'
+        - Name: DeployProduction
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Provider: CodeBuild
+            Version: '1'
+          RunOrder: 4
+          InputArtifacts:
+          - Name: SourceArtifact
+          - Name: ReleaseArtifact
+          Configuration:
+            ProjectName:
+              Ref: ProductionDeployProject
+            PrimarySource: SourceArtifact
+            EnvironmentVariables: '[{"name":"SOURCE_COMMIT","value":"#{Source.CommitId}","type":"PLAINTEXT"}]'
+Outputs:
+  PipelineName:
+    Value:
+      Ref: Pipeline
+  PipelineUrl:
+    Value:
+      Fn::Sub: https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${Pipeline}/view?region=${AWS::Region}
+  ArtifactsBucketName:
+    Value:
+      Ref: Artifacts
+  BuildLogGroupName:
+    Value:
+      Ref: BuildLogs

@@ -1,0 +1,10 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions:
+      python: '3.12'
+    commands:
+      - python -m pip install 'boto3>=1.40,<2'
+  build:
+    commands:
+      - python infra/cd/release.py deploy

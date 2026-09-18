@@ -14,3 +14,9 @@ Resources:
 Outputs:
   RepositoryUri:
     Value: !GetAtt Repository.RepositoryUri
+    Export:
+      Name: !Sub '${AWS::StackName}-RepositoryUri'
+  RepositoryArn:
+    Value: !GetAtt Repository.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RepositoryArn'
