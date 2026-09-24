@@ -14,6 +14,16 @@ from app.services.storage import download_storage_file
 router = APIRouter(tags=["files"])
 
 
+@router.delete("/shared-links/{token}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_shared_link(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await shared_link_service.revoke_shared_link(db=db, current_user=current_user, token=token)
+    return None
+
+
 @router.get("/shared-links/{token}/download")
 async def download_shared_file(
     token: str,

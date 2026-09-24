@@ -200,3 +200,64 @@ async def test_non_owner_cannot_create_public_shared_link(client, temp_storage):
     )
 
     assert link_response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_public_shared_link_revocation(client, temp_storage):
+    alice_token = await get_token(client, "alice@example.com", "alice123")
+    bob_token = await get_token(client, "bob@example.com", "bob123")
+    owner_headers = {"Authorization": f"Bearer {alice_token}"}
+    bob_headers = {"Authorization": f"Bearer {bob_token}"}
+    folder = await client.post(
+        "/api/v1/drive/folders",
+        json={"name": "revocation", "parent_id": None},
+        headers=owner_headers,
+    )
+    upload = await client.post(
+        f"/api/v1/drive/folders/{folder.json()['id']}/files",
+        files={"upload": ("public.txt", b"public content", "text/plain")},
+        headers=owner_headers,
+    )
+    file_id = upload.json()["id"]
+    links = []
+    for _ in range(2):
+        response = await client.post(
+            f"/api/v1/drive/files/{file_id}/shared-links", headers=owner_headers,
+        )
+        assert response.status_code == 201
+        links.append(response.json()["download_url"])
+    revoke_url = links[0].removesuffix("/download")
+    assert (await client.get(links[0])).content == b"public content"
+
+    assert (await client.delete(revoke_url)).status_code == 401
+    assert (await client.delete(revoke_url, headers=bob_headers)).status_code == 403
+    for role in ("viewer", "editor"):
+        share = await client.post(
+            f"/api/v1/drive/file/{file_id}/share",
+            json={"user_id": 2, "role": role}, headers=owner_headers,
+        )
+        assert share.status_code == 201
+        assert (await client.delete(revoke_url, headers=bob_headers)).status_code == 403
+    assert (await client.get(links[0])).status_code == 200
+
+    revoked = await client.delete(revoke_url, headers=owner_headers)
+    assert revoked.status_code == 204
+    assert revoked.content == b""
+    for headers in ({}, owner_headers, bob_headers):
+        assert (await client.get(links[0], headers=headers)).status_code == 401
+    assert (await client.delete(revoke_url, headers=owner_headers)).status_code == 204
+    assert (await client.get(links[0])).status_code == 401
+
+    active = await client.get(links[1])
+    assert active.status_code == 200
+    assert active.content == b"public content"
+    private = await client.get(
+        f"/api/v1/drive/files/{file_id}/download", headers=owner_headers,
+    )
+    assert private.status_code == 200
+    assert private.content == b"public content"
+
+    assert (await client.delete(
+        "/api/v1/drive/shared-links/unknown", headers=owner_headers,
+    )).status_code == 404
+    assert (await client.get("/api/v1/drive/shared-links/unknown/download")).status_code == 404
