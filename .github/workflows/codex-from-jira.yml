@@ -117,7 +117,7 @@ jobs:
           --url   "$JIRA_BASE_URL/rest/api/3/issue/$ISSUE_KEY/transitions" \
           --user  "$JIRA_EMAIL:$JIRA_API_TOKEN" \
           --header 'Content-Type: application/json' \
-          --data  '{"transition":{"id":"31"}}'
+          --data  '{"transition":{"id":"2"}}'
           # 31 is the Transition ID for changing the ticket status to In Review. Learn more here: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-issueidorkey-transitions-get
 
         # Comment with PR link
