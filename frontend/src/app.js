@@ -53,7 +53,7 @@ function render() {
   });
 }
 function row(item, type) {
-  return `<tr><td>${type === "folder" ? button(`▱ ${esc(item.name)}`, "open", `data-id="${item.id}"`) : `<span>${esc(item.name)}</span>`}<small>#${item.id}</small></td><td>${type === "folder" ? "Folder" : `${(item.size_bytes / 1024).toFixed(1)} KB`}</td><td class="actions">${type === "file" ? button("Download", "download", `data-id="${item.id}"`) : ""} ${button("Share", "share", `data-type="${type}" data-id="${item.id}"`)} ${button("Delete", "delete", `data-type="${type}" data-id="${item.id}"`)}</td></tr>`;
+  return `<tr><td>${type === "folder" ? button(`▱ ${esc(item.name)}`, "open", `data-id="${item.id}"`) : `<span>${esc(item.name)}</span>`}<small>#${item.id}</small></td><td>${type === "folder" ? "Folder" : (item.size_bytes < 1024 ? `${item.size_bytes} B` : `${(item.size_bytes / 1024).toFixed(1)} KB`)}</td><td class="actions">${type === "file" ? button("Download", "download", `data-id="${item.id}"`) : ""} ${button("Share", "share", `data-type="${type}" data-id="${item.id}"`)} ${button("Delete", "delete", `data-type="${type}" data-id="${item.id}"`)}</td></tr>`;
 }
 async function openFolder(folder, path = [folder]) {
   const result = await api(`drive/folders/${folder.id}/contents`);
