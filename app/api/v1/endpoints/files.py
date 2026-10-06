@@ -6,7 +6,7 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.drive import FileRead
-from app.schemas.drive import SharedLinkRead
+from app.schemas.drive import SharedLinkCreate, SharedLinkRead
 from app.services import files as file_service
 from app.services import shared_links as shared_link_service
 from app.services.storage import download_storage_file
@@ -82,6 +82,7 @@ async def download_file(
 )
 async def create_shared_link(
     file_id: int,
+    payload: SharedLinkCreate | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -89,9 +90,11 @@ async def create_shared_link(
         db=db,
         current_user=current_user,
         file_id=file_id,
+        expires_at=payload.expires_at if payload else None,
     )
     return SharedLinkRead(
-        download_url=f"/api/v1/drive/shared-links/{shared_link.token}/download"
+        download_url=f"/api/v1/drive/shared-links/{shared_link.token}/download",
+        expires_at=shared_link.expires_at,
     )
 
 

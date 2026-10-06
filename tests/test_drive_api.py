@@ -282,3 +282,52 @@ async def test_unknown_shared_link_returns_not_found(client):
     )
     assert response.status_code == 404
     assert (await client.get("/api/v1/drive/shared-links/unknown/download")).status_code == 404
+
+
+@pytest.mark.parametrize("payload", [{}, {"expires_at": None}])
+async def test_public_link_without_expiration(client, public_link, payload):
+    file_id, headers, _ = public_link
+    response = await client.post(
+        f"/api/v1/drive/files/{file_id}/shared-links", json=payload, headers=headers,
+    )
+    assert response.status_code == 201
+    assert response.json()["expires_at"] is None
+    assert (await client.get(response.json()["download_url"])).content == b"public content"
+
+
+@pytest.mark.parametrize("offset", [0, 5, -7])
+@pytest.mark.parametrize("expired", [False, True])
+async def test_public_link_expiration(client, public_link, offset, expired):
+    from datetime import datetime, timedelta, timezone
+
+    file_id, headers, legacy_url = public_link
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=-1 if expired else 1)).astimezone(
+        timezone(timedelta(hours=offset))
+    )
+    response = await client.post(
+        f"/api/v1/drive/files/{file_id}/shared-links",
+        json={"expires_at": expires_at.isoformat()}, headers=headers,
+    )
+    assert response.status_code == 201
+    stored_expiration = datetime.fromisoformat(response.json()["expires_at"])
+    if stored_expiration.tzinfo is None:
+        stored_expiration = stored_expiration.replace(tzinfo=timezone.utc)
+    assert stored_expiration == expires_at
+    download_url = response.json()["download_url"]
+    for request_headers in ({}, headers):
+        download = await client.get(download_url, headers=request_headers)
+        assert download.status_code == (401 if expired else 200)
+        if expired:
+            assert download.json()["detail"] == "Shared link has expired"
+        else:
+            assert download.content == b"public content"
+    assert (await client.get(legacy_url)).status_code == 200
+
+
+async def test_invalid_public_link_expiration(client, public_link):
+    file_id, headers, _ = public_link
+    response = await client.post(
+        f"/api/v1/drive/files/{file_id}/shared-links",
+        json={"expires_at": "invalid"}, headers=headers,
+    )
+    assert response.status_code == 422

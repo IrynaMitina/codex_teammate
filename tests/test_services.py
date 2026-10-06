@@ -169,3 +169,36 @@ async def test_deleted_parent_hides_children_and_files(seeded_db, temp_storage):
     with pytest.raises(HTTPException) as denied:
         await folder_service.list_folder_contents(seeded_db, alice, parent.id)
     assert denied.value.status_code == 403
+
+
+@pytest.mark.parametrize("seconds", [-1, 0, 1])
+@pytest.mark.parametrize("naive", [False, True])
+async def test_public_link_expiration_boundary(seeded_db, temp_storage, monkeypatch, seconds, naive):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(link_service, "datetime", FixedDatetime)
+    alice = await seeded_db.get(User, 1)
+    folder = await folder_service.create_folder(seeded_db, alice, FolderCreate(name="expiration"))
+    upload = UploadFile(BytesIO(b"content"), filename="expiration.txt")
+    try:
+        file = await file_service.upload_file(seeded_db, alice, folder.id, upload)
+    finally:
+        await upload.close()
+    expires_at = now + timedelta(seconds=seconds)
+    if naive:
+        expires_at = expires_at.replace(tzinfo=None)
+    link = await link_service.create_shared_link(seeded_db, alice, file.id, expires_at)
+    if seconds <= 0:
+        with pytest.raises(HTTPException) as denied:
+            await link_service.get_public_file(seeded_db, link.token)
+        assert denied.value.status_code == 401
+        assert denied.value.detail == "Shared link has expired"
+    else:
+        assert (await link_service.get_public_file(seeded_db, link.token)).id == file.id
