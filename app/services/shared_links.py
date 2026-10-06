@@ -15,6 +15,7 @@ async def create_shared_link(
     db: AsyncSession,
     current_user: User,
     file_id: int,
+    expires_at: datetime | None = None,
 ) -> SharedLink:
     db_file = await db.get(File, file_id)
     if not db_file or db_file.deleted_at:
@@ -22,7 +23,13 @@ async def create_shared_link(
     if db_file.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the file owner can create a shared link")
 
-    shared_link = SharedLink(file_id=file_id, token=secrets.token_urlsafe(32))
+    if expires_at is not None:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        expires_at = expires_at.astimezone(timezone.utc)
+    shared_link = SharedLink(
+        file_id=file_id, token=secrets.token_urlsafe(32), expires_at=expires_at,
+    )
     db.add(shared_link)
     await db.commit()
     await db.refresh(shared_link)
@@ -53,6 +60,13 @@ async def get_public_file(db: AsyncSession, token: str) -> File:
         raise HTTPException(status_code=404, detail="Shared file not found")
     if shared_link.revoked_at is not None:
         raise HTTPException(status_code=401, detail="Shared link has been revoked")
+    if shared_link.expires_at is not None:
+        expires_at = shared_link.expires_at
+        # SQLite returns timezone-naive values even for timezone-aware columns.
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= datetime.now(timezone.utc):
+            raise HTTPException(status_code=401, detail="Shared link has expired")
     db_file = await db.get(File, shared_link.file_id)
     if (
         not db_file

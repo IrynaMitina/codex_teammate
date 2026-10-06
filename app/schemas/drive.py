@@ -1,4 +1,6 @@
 # app/schemas/drive.py
+from datetime import datetime
+
 from pydantic import BaseModel
 
 
@@ -45,5 +47,10 @@ class PermissionRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SharedLinkCreate(BaseModel):
+    expires_at: datetime | None = None
+
+
 class SharedLinkRead(BaseModel):
     download_url: str
+    expires_at: datetime | None = None

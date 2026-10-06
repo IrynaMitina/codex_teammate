@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 
@@ -220,6 +222,68 @@ async def public_link(client, temp_storage):
     )
     assert link.status_code == 201
     return file_id, headers, link.json()["download_url"]
+
+
+@pytest.mark.parametrize("offset_seconds", [60, 0, -60])
+@pytest.mark.parametrize("timestamp_kind", ["utc", "offset", "naive"])
+async def test_public_link_expiration(
+    client, public_link, monkeypatch, offset_seconds, timestamp_kind,
+):
+    from app.services import shared_links
+
+    file_id, headers, _ = public_link
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(shared_links, "datetime", FixedDatetime)
+    expires_at = now + timedelta(seconds=offset_seconds)
+    input_timestamp = expires_at
+    if timestamp_kind == "offset":
+        input_timestamp = expires_at.astimezone(timezone(timedelta(hours=5)))
+    elif timestamp_kind == "naive":
+        input_timestamp = expires_at.replace(tzinfo=None)
+    response = await client.post(
+        f"/api/v1/drive/files/{file_id}/shared-links",
+        headers=headers,
+        json={"expires_at": input_timestamp.isoformat()},
+    )
+    assert response.status_code == 201
+    stored_timestamp = datetime.fromisoformat(response.json()["expires_at"])
+    assert stored_timestamp.replace(tzinfo=timezone.utc) == expires_at
+    download_url = response.json()["download_url"]
+    download = await client.get(download_url)
+    if offset_seconds > 0:
+        assert download.status_code == 200
+        assert download.content == b"public content"
+        now = expires_at
+        download = await client.get(download_url)
+    assert download.status_code == 401
+    assert download.json()["detail"] == "Shared link has expired"
+
+
+@pytest.mark.parametrize("payload", [{}, {"expires_at": None}])
+async def test_public_link_without_expiration(client, public_link, payload):
+    file_id, headers, existing_url = public_link
+    response = await client.post(
+        f"/api/v1/drive/files/{file_id}/shared-links", headers=headers, json=payload,
+    )
+    assert response.status_code == 201
+    assert response.json()["expires_at"] is None
+    assert (await client.get(response.json()["download_url"])).status_code == 200
+    assert (await client.get(existing_url)).status_code == 200
+
+
+async def test_public_link_rejects_invalid_expiration(client, public_link):
+    file_id, headers, _ = public_link
+    response = await client.post(
+        f"/api/v1/drive/files/{file_id}/shared-links",
+        headers=headers, json={"expires_at": "invalid"},
+    )
+    assert response.status_code == 422
 
 
 async def test_owner_can_revoke_public_shared_link(client, public_link):
